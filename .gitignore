@@ -1,0 +1,30 @@
+# ========================
+# Python & Environments
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# ========================
+# Secrets & Configs
+# ========================
+.env
+config.json
+.streamlit/secrets.toml
+
+# ========================
+# Data Directory
+# ========================
+# 실제 덤프 데이터는 무시하되, 폴더 자체와 README, 샘플 파일은 유지
+data/*
+!data/README.md
+!data/example.json
+
+# ========================
+# OS specific files
+# ========================
+.DS_Store
+Thumbs.db

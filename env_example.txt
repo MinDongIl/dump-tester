@@ -1,0 +1,24 @@
+# 시험 title (ex. AWS-SAA, GCP-SAA 등)
+exam_title=""
+
+# AI 모델 설정
+default_model="gemini-2.5-flash"
+alternative_model="gemini-2.5-pro"
+
+# Notion API 설정
+# 페이지에 생성한 데이터 베이스 id값
+notion_database_id="DB id 32자리 문자열"
+notion_wrong_db_id="DB id 32자리 문자열"
+notion_keyword_db_id="DB id 32자리 문자열"
+
+# 사용하는 노션 계정 통합 API key
+notion_api_key="프라이빗 API 통합 시크릿"
+
+# 사용하고자 하는 AI 모델 설정
+# Google API 설정
+google_api_key="gemini 사용을 위한 google api key"
+anthropic_api_key (claude key 변수)
+openai_api_key (GPT key 변수)
+
+# 데이터 파일 경로 설정
+DATA_FILE_PATH="data/example.json"
