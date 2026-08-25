@@ -1,0 +1,21 @@
+# Web Framework
+streamlit
+
+# Data Validation & Settings
+pydantic
+pydantic-settings
+python-dotenv
+
+# LangChain & AI Models
+langchain
+langchain-core
+langchain-google-genai
+langchain-openai
+langchain-anthropic
+
+# Notion API
+notion-client
+notionize
+
+# PDF Extraction Tool
+PyMuPDF
