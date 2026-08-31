@@ -16,6 +16,7 @@ langchain-anthropic
 # Notion API
 notion-client
 notionize
+certifi
 
 # PDF Extraction Tool
 PyMuPDF

@@ -1,6 +1,8 @@
 import os
+import certifi
 import json
 import re
+import httpx
 import streamlit as st
 from core.services import (
     answer_question, 
@@ -11,6 +13,10 @@ from core.services import (
 )
 from core.settings import settings
 from notion_client import Client as NotionClient
+
+# 🛡️ SSL 인증서 경로 강제 지정 (가장 먼저 실행되어야 함)
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
 # --- 환경 변수에서 데이터 파일 경로 불러오기 (기본값 설정) ---
 DATA_FILE = settings.data_file_path
@@ -33,13 +39,19 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. 상태 관리 세팅 ---
+# --- 2. 상태 관리 및 공통 객체 세팅 ---
 if 'q_idx' not in st.session_state:
     st.session_state.q_idx = 0
 if 'ai_result' not in st.session_state:
     st.session_state.ai_result = None
 if 'ext_ai_result' not in st.session_state:
     st.session_state.ext_ai_result = None
+
+# 💡 노션 클라이언트를 여기서 딱 한 번만 생성하여 전체 공유 (보안 무시 설정 포함)
+notion_client = NotionClient(
+    auth=settings.notion_api_key.get_secret_value(), 
+    client=httpx.Client(verify=False)
+)
 
 questions = load_json_questions()
 
@@ -148,11 +160,9 @@ if app_mode == "📚 내 문제집 풀기":
         
         st.divider()
         st.subheader("📚 핵심 개념 요약 저장")
-        # '서비스'라는 단어를 '개념(Concept)'으로 범용화
         concepts = st.multiselect("저장할 핵심 개념 선택:", options=list(res.used_services), default=list(res.used_services))
         
         if st.button("📝 개념 요약 Notion에 저장하기"):
-            notion_client = NotionClient(auth=settings.notion_api_key.get_secret_value())
             for concept in concepts:
                 with st.spinner(f"[{concept}] 저장 중..."):
                     note = explain_service(settings.default_model, concept)
@@ -162,8 +172,6 @@ if app_mode == "📚 내 문제집 풀기":
         st.divider()
         st.subheader("📝 심화 학습 (오답노트 & 키워드)")
         col1, col2 = st.columns(2)
-        
-        notion_client = NotionClient(auth=settings.notion_api_key.get_secret_value())
         
         with col1:
             if st.button("❌ 오답노트 바로 전송 (기존 해설 활용)"):
@@ -240,7 +248,6 @@ elif app_mode == "🔎 외부 문제 분석기":
         )
         
         if st.button("📝 외부 문제 개념 Notion에 저장하기", key="ext_save_btn"):
-            notion_client = NotionClient(auth=settings.notion_api_key.get_secret_value())
             for concept in ext_concepts:
                 with st.spinner(f"[{concept}] 저장 중..."):
                     note = explain_service(settings.default_model, concept)
@@ -250,8 +257,6 @@ elif app_mode == "🔎 외부 문제 분석기":
         st.divider()
         st.subheader("📝 심화 학습 (오답노트 & 키워드)")
         ext_col1, ext_col2 = st.columns(2)
-        
-        notion_client = NotionClient(auth=settings.notion_api_key.get_secret_value())
         
         with ext_col1:
             if st.button("❌ 외부문제 오답노트 전송", key="ext_wrong_btn"):

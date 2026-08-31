@@ -110,6 +110,10 @@ def save_to_notion(
     notion_client: NotionClient, service_name: str, content: str
 ) -> None:
     print("🔥 학습 노트를 Notion에 저장합니다...")
+    
+    # 💡 추가된 방어 코드: 서비스 이름에 콤마가 있으면 띄어쓰기로 바꿈
+    safe_service_name = service_name.replace(",", " ").strip() 
+
     notion_client.pages.create(
         parent={"database_id": settings.notion_database_id},
         icon={"type": "emoji", "emoji": "📚"},
@@ -125,7 +129,7 @@ def save_to_notion(
             "Tags": {  
                 "multi_select": [
                     {"name": settings.exam_title},
-                    {"name": service_name},
+                    {"name": safe_service_name}, # 💡 안전한 변수로 교체
                 ]
             },
         },
