@@ -34,19 +34,20 @@ def map_and_translate_txt_answers():
 
     # 💡 [핵심] AI에게 TXT 원본을 던져주고 알아서 정답/해설만 번역해오라고 지시
     prompt = PromptTemplate(
-        template="""당신은 AWS SAA 시험 문제 전문 번역가입니다.
+        template="""당신은 {exam_title} 시험 문제 전문 번역가입니다.
         아래에 제공된 텍스트는 덤프 파일에서 발췌한 1개의 문제 블록입니다. (문제 질문, 정답, 해설이 섞여 있습니다.)
 
         [지시사항]
         1. 이 텍스트에서 '문제 질문(Question)' 부분은 무시하세요.
-        2. '정답(예: B. Use AWS Config...)'과 그 뒤에 이어지는 '해설(Explanation)' 부분만 찾아내세요.
+        2. '정답(예: B. ...)'과 그 뒤에 이어지는 '해설(Explanation)' 부분만 찾아내세요.
         3. 찾아낸 정답과 해설을 **가독성 좋은 자연스러운 한국어로 번역**하세요.
         4. 출력은 오직 번역된 정답과 해설만 제공하세요.
 
         <덤프 텍스트 원본>
         {text}
         """,
-        input_variables=["text"]
+        input_variables=["text"],
+        partial_variables={"exam_title": settings.exam_title},
     )
     chain = prompt | model | StrOutputParser()
 

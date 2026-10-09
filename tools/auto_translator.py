@@ -53,8 +53,8 @@ def run_auto_translator():
     parser = JsonOutputParser(pydantic_object=QuestionList)
     
     prompt = PromptTemplate(
-        template="""당신은 AWS SAA 자격증 시험 문제를 정리하는 어시스턴트입니다.
-        아래에 제공된 텍스트(PDF에서 추출함)에서 AWS 문제들을 찾아서 다음 형식의 JSON 배열로 만들어주세요.
+        template="""당신은 {exam_title} 자격증 시험 문제를 정리하는 어시스턴트입니다.
+        아래에 제공된 텍스트(PDF에서 추출함)에서 시험 문제들을 찾아서 다음 형식의 JSON 배열로 만들어주세요.
         
         규칙:
         1. 문제는 자연스러운 한국어로 번역하세요.
@@ -72,7 +72,7 @@ def run_auto_translator():
         </Text>
         """,
         input_variables=["text"],
-        partial_variables={"format_instructions": parser.get_format_instructions()}
+        partial_variables={"format_instructions": parser.get_format_instructions(), "exam_title": settings.exam_title}
     )
     
     chain = prompt | model | parser

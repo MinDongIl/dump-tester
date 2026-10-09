@@ -20,3 +20,4 @@ certifi
 
 # PDF Extraction Tool
 PyMuPDF
+pypdf

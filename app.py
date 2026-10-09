@@ -12,6 +12,7 @@ from core.services import (
     extract_and_save_keywords
 )
 from core.settings import settings
+from core.models import QnAModel
 from notion_client import Client as NotionClient
 
 # 🛡️ SSL 인증서 경로 강제 지정 (가장 먼저 실행되어야 함)
@@ -28,9 +29,56 @@ def load_json_questions(filepath=DATA_FILE):
         return []
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            questions = json.load(f)
     except json.JSONDecodeError:
         return []
+    for q in questions:
+        for k in ('question', 'options', 'original_answer'):
+            q[k] = fix_mojibake(q.get(k) or '')
+    return questions
+
+
+def fix_mojibake(text: str) -> str:
+    """PDF 추출 때 깨진 특수문자 복구 (예: 'ג€ role' -> '" role', 'n2ג€"highmem' -> 'n2-highmem')"""
+    return text.replace('ג€"', '-').replace('ג€', '"').replace('"¢ ', '• ')
+
+
+def norm_answer(ans: str) -> str:
+    """'B, D' / 'b,d' / '' -> 'B,D' 형태로 정규화 (정답 뒤에 해설이 붙어 있어도 앞의 글자만 사용)"""
+    m = re.match(r"\s*([A-F](?:\s*,\s*[A-F])*)\b", (ans or "").upper())
+    return ",".join(sorted(re.findall(r"[A-F]", m.group(1)))) if m else ""
+
+
+# --- AI 해설 캐시: 같은 문제는 AI를 다시 부르지 않음 ---
+EXPLAIN_FILE = os.path.splitext(DATA_FILE)[0] + "_explanations.json"
+
+
+def _load_explanations() -> dict:
+    try:
+        with open(EXPLAIN_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def get_cached_explanation(q: dict):
+    d = _load_explanations().get(str(q.get('id')))
+    return QnAModel(**d) if d else None
+
+
+def explain_cached(q: dict) -> QnAModel:
+    res = get_cached_explanation(q)
+    if res:
+        return res
+    res = answer_question(settings.default_model, q.get('question', ''), q.get('options', ''), q.get('original_answer', ''))
+    if q.get('id') is not None:
+        cache = _load_explanations()
+        cache[str(q['id'])] = res.model_dump()
+        tmp = EXPLAIN_FILE + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, EXPLAIN_FILE)  # 쓰다가 끊겨도 기존 캐시가 깨지지 않게
+    return res
 
 # --- 페이지 기본 설정 (동적 타이틀 적용) ---
 st.set_page_config(
@@ -117,13 +165,19 @@ if app_mode == "📚 내 문제집 풀기":
     formatted_options = re.sub(r'([A-E]\.)', r'\n\n**\1**', raw_options).strip()
     st.warning(f"**보기:**\n{formatted_options}")
 
-    st.radio(
-        "📝 내 정답 선택:", 
-        ["A", "B", "C", "D", "E", "복수 정답"], 
-        index=None, 
-        horizontal=True, 
-        key=f"q_{st.session_state.q_idx}"
-    )
+    correct = norm_answer(current_q.get('original_answer', ''))
+    letters = sorted(set(re.findall(r'(?:^|\s)([A-F])\.', raw_options))) or ["A", "B", "C", "D", "E"]
+    n_ans = len(correct.split(",")) if correct else 1
+    if n_ans > 1:
+        picked = st.multiselect(f"📝 내 정답 선택 ({n_ans}개):", letters, max_selections=n_ans, key=f"q_{st.session_state.q_idx}")
+    else:
+        picked = st.radio("📝 내 정답 선택:", letters, index=None, horizontal=True, key=f"q_{st.session_state.q_idx}")
+    mine = norm_answer(",".join(picked) if isinstance(picked, list) else (picked or ""))
+    if mine and correct and len(mine.split(",")) == n_ans:
+        if mine == correct:
+            st.success("⭕ 정답!")
+        else:
+            st.error(f"❌ 오답 · 정답은 **{correct}**")
 
     st.divider()
 
@@ -138,16 +192,13 @@ if app_mode == "📚 내 문제집 풀기":
     st.write("") 
     st.markdown("##### 🤖 AI 심층 분석")
     
+    if st.session_state.ai_result is None:
+        st.session_state.ai_result = get_cached_explanation(current_q)  # 예전에 본 해설은 바로 표시
+
     if st.button("AI 상세 해설 및 노션 노트 생성", type="primary"):
         with st.spinner("AI가 분석 중입니다..."):
             try:
-                result = answer_question(
-                    settings.default_model, 
-                    current_q.get("question", ""), 
-                    current_q.get("options", ""), 
-                    current_q.get("original_answer", "")
-                )
-                st.session_state.ai_result = result
+                st.session_state.ai_result = explain_cached(current_q)
             except Exception as e:
                 st.error(f"오류 발생: {e}")
 
@@ -186,7 +237,7 @@ if app_mode == "📚 내 문제집 풀기":
                             res.explanation,
                             question=current_q.get('question', ''),
                             options=current_q.get('options', ''),
-                            my_answer=st.session_state.get(f"q_{st.session_state.q_idx}") or "",
+                            my_answer=mine,
                             correct_answer=current_q.get('original_answer', ''),
                         )
                         st.success("오답노트가 노션에 저장되었습니다! ⚡")
@@ -214,11 +265,6 @@ elif app_mode == "📝 모의고사 모드":
     import random
     import time
     import pandas as pd
-
-    def norm_answer(ans: str) -> str:
-        """'B, D' / 'b,d' / '' -> 'B,D' 형태로 정규화 (정답 뒤에 해설이 붙어 있어도 앞의 글자만 사용)"""
-        m = re.match(r"\s*([A-F](?:\s*,\s*[A-F])*)\b", (ans or "").upper())
-        return ",".join(sorted(re.findall(r"[A-F]", m.group(1)))) if m else ""
 
     ss = st.session_state
     pool = [q for q in questions if norm_answer(q.get('original_answer', ''))]
@@ -308,7 +354,7 @@ elif app_mode == "📝 모의고사 모드":
 
     def save_mock_wrong(r):
         q = r["q"]
-        res = answer_question(settings.default_model, q['question'], q['options'], q['original_answer'])
+        res = explain_cached(q)
         save_wrong_note_to_notion(
             notion_client, settings.notion_wrong_db_id, q.get('id', r["no"]),
             res.topic, res.used_services, res.explanation,
