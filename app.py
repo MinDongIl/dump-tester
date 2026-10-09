@@ -173,29 +173,31 @@ if app_mode == "📚 내 문제집 풀기":
     else:
         picked = st.radio("📝 내 정답 선택:", letters, index=None, horizontal=True, key=f"q_{st.session_state.q_idx}")
     mine = norm_answer(",".join(picked) if isinstance(picked, list) else (picked or ""))
-    if mine and correct and len(mine.split(",")) == n_ans:
-        if mine == correct:
-            st.success("⭕ 정답!")
+    sub_key = f"submitted_{st.session_state.q_idx}"
+    # 클릭 실수 방지: 제출 버튼을 눌러야 채점 (제출 후 답을 바꾸면 다시 제출해야 반영)
+    if st.button("✅ 제출하고 채점", disabled=not (mine and len(mine.split(",")) == n_ans)):
+        st.session_state[sub_key] = mine
+    submitted = st.session_state.get(sub_key)
+    if submitted and correct:
+        if submitted == correct:
+            st.success(f"⭕ 정답! (내 답 {submitted})")
         else:
-            st.error(f"❌ 오답 · 정답은 **{correct}**")
+            st.error(f"❌ 오답 · 내 답 {submitted} / 정답 **{correct}**")
 
     st.divider()
 
-    st.markdown("##### 📖 덤프 원본 정답")
-    with st.expander(f"클릭하여 정답 확인 (문제 {st.session_state.q_idx + 1})", expanded=False):
+    st.markdown("##### 📖 덤프 원본 정답·해설")
+    with st.expander("클릭하여 덤프 원본 확인 (해설이 있으면 AI 없이 먼저 확인)", expanded=False):
         orig_ans = current_q.get('original_answer', '').strip()
         if orig_ans:
-            st.success(orig_ans)
+            st.markdown(orig_ans)
         else:
             st.error("원본 정답이 비어있습니다. AI 해설을 활용하세요.")
 
     st.write("") 
     st.markdown("##### 🤖 AI 심층 분석")
     
-    if st.session_state.ai_result is None:
-        st.session_state.ai_result = get_cached_explanation(current_q)  # 예전에 본 해설은 바로 표시
-
-    if st.button("AI 상세 해설 및 노션 노트 생성", type="primary"):
+    if st.button("AI 상세 해설 및 노션 노트 생성" + (" (저장된 해설·무료)" if get_cached_explanation(current_q) else ""), type="primary"):
         with st.spinner("AI가 분석 중입니다..."):
             try:
                 st.session_state.ai_result = explain_cached(current_q)
@@ -237,7 +239,7 @@ if app_mode == "📚 내 문제집 풀기":
                             res.explanation,
                             question=current_q.get('question', ''),
                             options=current_q.get('options', ''),
-                            my_answer=mine,
+                            my_answer=st.session_state.get(f"submitted_{st.session_state.q_idx}") or mine,
                             correct_answer=current_q.get('original_answer', ''),
                         )
                         st.success("오답노트가 노션에 저장되었습니다! ⚡")
