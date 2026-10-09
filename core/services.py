@@ -1,3 +1,4 @@
+import re
 from typing import cast, List
 from pydantic import BaseModel, Field
 from core.models import QnAModel, StudyNoteModel
@@ -150,7 +151,8 @@ class KeywordListModel(BaseModel):
     items: List[KeywordPair]
 
 def save_wrong_note_to_notion(
-    notion_client: NotionClient, db_id: str, q_no: int, topic: str, tags: list, explanation: str
+    notion_client: NotionClient, db_id: str, q_no: int, topic: str, tags: list, explanation: str,
+    question: str = "", options: str = "", my_answer: str = "", correct_answer: str = "",
 ) -> None:
     print(f"❌ 기존 해설을 활용하여 오답노트를 Notion에 직접 저장합니다... (문제 {q_no}번)")
     
@@ -177,8 +179,22 @@ def save_wrong_note_to_notion(
                 "multi_select": safe_tags  
             }
         },
-        children=notionize(explanation)
+        children=notionize(_wrong_note_markdown(question, options, my_answer, correct_answer) + explanation)
     )
+
+
+def _wrong_note_markdown(question: str, options: str, my_answer: str, correct_answer: str) -> str:
+    """오답노트 본문 앞에 붙일 문제/보기/답 섹션. 문제가 없으면 빈 문자열."""
+    if not question.strip():
+        return ""
+    md = "## 📝 문제\n\n" + " ".join(question.split()) + "\n\n"
+    if options.strip():
+        # PDF 추출 줄바꿈을 정리하고 보기(A. B. ...)마다 한 줄씩
+        opts = re.split(r"\s(?=[A-F]\.\s)", " " + " ".join(options.split()))
+        md += "### 보기\n\n" + "\n".join(f"- {o.strip()}" for o in opts if o.strip()) + "\n\n"
+    if my_answer or correct_answer:
+        md += f"**내 답:** {my_answer or '-'} / **정답:** {correct_answer or '-'}\n\n"
+    return md + "## 💡 해설\n\n"
 
 def extract_and_save_keywords(
     notion_client: NotionClient, db_id: str, text: str, model_name: str = settings.default_model

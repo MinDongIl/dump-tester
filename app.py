@@ -60,7 +60,7 @@ st.sidebar.title(f"{settings.exam_icon} 튜터 메뉴")
 
 app_mode = st.sidebar.radio(
     "학습 모드를 선택하세요:",
-    ["📚 내 문제집 풀기", "🔎 외부 문제 분석기"]
+    ["📚 내 문제집 풀기", "📝 모의고사 모드", "🔎 외부 문제 분석기"]
 )
 
 st.sidebar.divider()
@@ -183,7 +183,11 @@ if app_mode == "📚 내 문제집 풀기":
                             st.session_state.q_idx + 1,
                             res.topic,         
                             res.used_services, 
-                            res.explanation    
+                            res.explanation,
+                            question=current_q.get('question', ''),
+                            options=current_q.get('options', ''),
+                            my_answer=st.session_state.get(f"q_{st.session_state.q_idx}") or "",
+                            correct_answer=current_q.get('original_answer', ''),
                         )
                         st.success("오답노트가 노션에 저장되었습니다! ⚡")
                     except Exception as e:
@@ -199,6 +203,143 @@ if app_mode == "📚 내 문제집 풀기":
                             current_q.get('question', '')
                         )
                         st.success("키워드 정리가 노션 표에 추가되었습니다!")
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
+
+
+# ==========================================
+# 모드 3: 모의고사
+# ==========================================
+elif app_mode == "📝 모의고사 모드":
+    import random
+    import time
+    import pandas as pd
+
+    def norm_answer(ans: str) -> str:
+        """'B, D' / 'b,d' / '' -> 'B,D' 형태로 정규화 (정답 뒤에 해설이 붙어 있어도 앞의 글자만 사용)"""
+        m = re.match(r"\s*([A-F](?:\s*,\s*[A-F])*)\b", (ans or "").upper())
+        return ",".join(sorted(re.findall(r"[A-F]", m.group(1)))) if m else ""
+
+    ss = st.session_state
+    pool = [q for q in questions if norm_answer(q.get('original_answer', ''))]
+    if not pool:
+        st.warning(f"{DATA_FILE} 에 정답이 있는 문제가 없습니다.")
+        st.stop()
+
+    st.sidebar.subheader("📝 모의고사 설정")
+    n = st.sidebar.number_input("문항 수", min_value=1, max_value=len(pool), value=min(50, len(pool)), step=5)
+    if st.sidebar.button("🚀 새 모의고사 시작", type="primary"):
+        ss.mock_qs = random.sample(pool, int(n))
+        ss.mock_round = ss.get('mock_round', 0) + 1
+        ss.mock_start = time.time()
+        ss.mock_done = False
+        st.rerun()
+
+    st.title(f"📝 {settings.exam_title} 모의고사")
+    if 'mock_qs' not in ss:
+        st.info("왼쪽에서 문항 수를 정하고 **새 모의고사 시작**을 누르세요. 전체 문제에서 랜덤 출제됩니다.")
+        if not any(q.get('domain') for q in pool):
+            st.caption("💡 도메인별 분석을 보려면 먼저 `python -m tools.domain_tagger` 로 문제에 도메인을 태깅하세요.")
+        st.stop()
+
+    qs, rnd = ss.mock_qs, ss.mock_round
+
+    def key_of(i):
+        return f"mock_{rnd}_{i}"
+
+    # --- 응시 화면 ---
+    if not ss.mock_done:
+        st.caption(f"총 {len(qs)}문항 · 시작 {time.strftime('%H:%M', time.localtime(ss.mock_start))} · 다 풀고 맨 아래 **제출** 버튼")
+        with st.form(f"mock_form_{rnd}"):
+            for i, q in enumerate(qs):
+                st.markdown(f"#### {i + 1}.")
+                st.write(q.get('question', ''))
+                opts = q.get('options', '')
+                st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', opts).strip())
+                letters = sorted(set(re.findall(r'(?:^|\s)([A-F])\.', opts))) or ["A", "B", "C", "D"]
+                n_ans = len(norm_answer(q['original_answer']).split(","))
+                if n_ans > 1:
+                    st.multiselect(f"답 {n_ans}개 선택", letters, max_selections=n_ans, key=key_of(i))
+                else:
+                    st.radio("답 선택", letters, index=None, horizontal=True, key=key_of(i))
+                st.divider()
+            if st.form_submit_button("✅ 제출하고 채점하기", type="primary"):
+                ss.mock_done = True
+                ss.mock_elapsed = time.time() - ss.mock_start
+                st.rerun()
+        st.stop()
+
+    # --- 채점 ---
+    rows = []
+    for i, q in enumerate(qs):
+        picked = ss.get(key_of(i))
+        mine = norm_answer(",".join(picked) if isinstance(picked, list) else (picked or ""))
+        correct = norm_answer(q['original_answer'])
+        rows.append({
+            "no": i + 1, "id": q.get('id'), "q": q,
+            "도메인": q.get('domain') or "미분류", "서비스": q.get('service') or "미분류",
+            "내 답": mine or "무응답", "정답": correct, "정답여부": mine == correct,
+        })
+    df = pd.DataFrame(rows)
+    total, right = len(df), int(df["정답여부"].sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("점수", f"{right} / {total}")
+    c2.metric("정답률", f"{right / total:.0%}")
+    c3.metric("오답률", f"{1 - right / total:.0%}")
+    c4.metric("소요 시간", f"{int(ss.mock_elapsed // 60)}분")
+
+    st.subheader("📊 도메인별 정답률 (약한 순)")
+    dom = df.groupby("도메인")["정답여부"].agg(문항수="count", 정답="sum")
+    dom["정답률"] = (dom["정답"] / dom["문항수"] * 100).round(0)
+    dom = dom.sort_values("정답률")
+    st.dataframe(dom, use_container_width=True)
+    st.bar_chart(dom["정답률"], horizontal=True)
+    weakest = dom.index[0]
+    st.error(f"가장 약한 도메인: **{weakest}** (정답률 {dom.loc[weakest, '정답률']:.0f}%)")
+
+    wrong = df[~df["정답여부"]]
+    if not wrong.empty:
+        st.subheader("🎯 자주 틀린 서비스/개념 TOP 10")
+        st.dataframe(wrong["서비스"].value_counts().head(10).rename("오답 수"), use_container_width=True)
+
+    st.divider()
+    st.subheader(f"❌ 오답 목록 ({len(wrong)}개)")
+
+    def save_mock_wrong(r):
+        q = r["q"]
+        res = answer_question(settings.default_model, q['question'], q['options'], q['original_answer'])
+        save_wrong_note_to_notion(
+            notion_client, settings.notion_wrong_db_id, q.get('id', r["no"]),
+            res.topic, res.used_services, res.explanation,
+            question=q['question'], options=q['options'],
+            my_answer=r["내 답"], correct_answer=q['original_answer'],
+        )
+        return res
+
+    if not wrong.empty and st.button(f"📥 오답 {len(wrong)}개 전부 AI 해설 + 노션 오답노트 저장"):
+        bar = st.progress(0.0)
+        fails = []
+        for k, (_, r) in enumerate(wrong.iterrows(), 1):
+            try:
+                save_mock_wrong(r)
+            except Exception as e:
+                fails.append(f"#{r['id']}: {e}")
+            bar.progress(k / len(wrong), text=f"{k}/{len(wrong)} 저장 중...")
+        st.success(f"{len(wrong) - len(fails)}개 저장 완료!")
+        for f in fails:
+            st.error(f)
+
+    for _, r in wrong.iterrows():
+        q = r["q"]
+        with st.expander(f"{r['no']}번 (원본 #{r['id']}) · {r['도메인']} · {r['서비스']} — 내 답 {r['내 답']} / 정답 {r['정답']}"):
+            st.write(q['question'])
+            st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', q['options']).strip())
+            if st.button("🤖 AI 해설 보고 오답노트 저장", key=f"mock_save_{rnd}_{r['no']}"):
+                with st.spinner("AI 해설 생성 + 노션 저장 중..."):
+                    try:
+                        st.markdown(save_mock_wrong(r).explanation)
+                        st.success("오답노트 저장 완료!")
                     except Exception as e:
                         st.error(f"오류 발생: {e}")
 
@@ -268,7 +409,8 @@ elif app_mode == "🔎 외부 문제 분석기":
                             0, 
                             res.topic,
                             res.used_services,
-                            res.explanation
+                            res.explanation,
+                            question=external_text,
                         )
                         st.success("외부 문제 오답노트 생성 완료!")
                     except Exception as e:

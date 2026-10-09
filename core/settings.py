@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     # ==========================================
     # 🤖 AI 모델 설정
     # ==========================================
-    default_model: str = "gemini-2.5-flash"       # 범용적으로 많이 쓰는 모델로 기본값 변경
-    alternative_model: str = "gemini-2.5-pro"
+    default_model: str = "gemini-3.5-flash"       # 범용적으로 많이 쓰는 모델로 기본값 변경
+    alternative_model: str = "gemini-3.1-pro"
     
     # ==========================================
     # 📚 노션 데이터베이스 ID 설정
