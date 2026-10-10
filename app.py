@@ -89,7 +89,10 @@ st.set_page_config(
 
 # --- 2. 상태 관리 및 공통 객체 세팅 ---
 if 'q_idx' not in st.session_state:
-    st.session_state.q_idx = 0
+    try:  # 새로고침해도 보던 문제 번호 유지 (URL ?q=)
+        st.session_state.q_idx = max(int(st.query_params.get("q", 1)) - 1, 0)
+    except ValueError:
+        st.session_state.q_idx = 0
 if 'ai_result' not in st.session_state:
     st.session_state.ai_result = None
 if 'ext_ai_result' not in st.session_state:
@@ -106,10 +109,14 @@ questions = load_json_questions()
 # --- 3. 사이드바 (메뉴 및 내비게이션) ---
 st.sidebar.title(f"{settings.exam_icon} 튜터 메뉴")
 
+MODES = ["📚 내 문제집 풀기", "📝 모의고사 모드", "🔎 외부 문제 분석기"]
+_m = st.query_params.get("mode", "0")
 app_mode = st.sidebar.radio(
     "학습 모드를 선택하세요:",
-    ["📚 내 문제집 풀기", "📝 모의고사 모드", "🔎 외부 문제 분석기"]
+    MODES,
+    index=int(_m) if _m in ("0", "1", "2") else 0,
 )
+st.query_params["mode"] = str(MODES.index(app_mode))  # 새로고침해도 모드 유지
 
 st.sidebar.divider()
 
@@ -151,6 +158,8 @@ if app_mode == "📚 내 문제집 풀기":
             st.session_state.ai_result = None
             st.rerun()
 
+    st.session_state.q_idx = min(st.session_state.q_idx, len(questions) - 1)
+    st.query_params["q"] = str(st.session_state.q_idx + 1)
     current_q = questions[st.session_state.q_idx]
 
     # 동적 메인 타이틀
@@ -274,6 +283,36 @@ elif app_mode == "📝 모의고사 모드":
         st.warning(f"{DATA_FILE} 에 정답이 있는 문제가 없습니다.")
         st.stop()
 
+    MOCK_FILE = os.path.splitext(DATA_FILE)[0] + "_mock_state.json"
+
+    def save_mock_state():
+        state = {k: ss[k] for k in ("mock_round", "mock_start", "mock_done", "mock_answers") if k in ss}
+        state["mock_elapsed"] = ss.get("mock_elapsed", 0)
+        state["qids"] = [q['id'] for q in ss.mock_qs]
+        tmp = MOCK_FILE + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False)
+        os.replace(tmp, MOCK_FILE)
+
+    # 새로고침·재접속으로 세션이 날아가도 마지막 모의고사(응시 중/채점 결과)를 복원
+    if 'mock_qs' not in ss and os.path.exists(MOCK_FILE):
+        try:
+            with open(MOCK_FILE, encoding='utf-8') as f:
+                saved = json.load(f)
+            by_id = {q['id']: q for q in pool}
+            restored = [by_id[i] for i in saved["qids"] if i in by_id]
+            if restored:
+                ss.mock_qs = restored
+                for k in ("mock_round", "mock_start", "mock_done", "mock_elapsed"):
+                    ss[k] = saved[k]
+                ss.mock_answers = saved.get("mock_answers", {})
+                for i, q in enumerate(restored):  # 응시 중이었다면 고른 답을 위젯에 다시 채움
+                    a = ss.mock_answers.get(str(q['id']))
+                    if a and not ss.mock_done:
+                        ss[f"mock_{ss.mock_round}_{i}"] = a
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     st.sidebar.subheader("📝 모의고사 설정")
     n = st.sidebar.number_input("문항 수", min_value=1, max_value=len(pool), value=min(50, len(pool)), step=5)
     if st.sidebar.button("🚀 새 모의고사 시작", type="primary"):
@@ -281,6 +320,9 @@ elif app_mode == "📝 모의고사 모드":
         ss.mock_round = ss.get('mock_round', 0) + 1
         ss.mock_start = time.time()
         ss.mock_done = False
+        ss.mock_answers = {}
+        ss.mock_elapsed = 0
+        save_mock_state()
         st.rerun()
 
     st.title(f"📝 {settings.exam_title} 모의고사")
@@ -298,29 +340,33 @@ elif app_mode == "📝 모의고사 모드":
     # --- 응시 화면 ---
     if not ss.mock_done:
         st.caption(f"총 {len(qs)}문항 · 시작 {time.strftime('%H:%M', time.localtime(ss.mock_start))} · 다 풀고 맨 아래 **제출** 버튼")
-        with st.form(f"mock_form_{rnd}"):
-            for i, q in enumerate(qs):
-                st.markdown(f"#### {i + 1}.")
-                st.write(q.get('question', ''))
-                opts = q.get('options', '')
-                st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', opts).strip())
-                letters = sorted(set(re.findall(r'(?:^|\s)([A-F])\.', opts))) or ["A", "B", "C", "D"]
-                n_ans = len(norm_answer(q['original_answer']).split(","))
-                if n_ans > 1:
-                    st.multiselect(f"답 {n_ans}개 선택", letters, max_selections=n_ans, key=key_of(i))
-                else:
-                    st.radio("답 선택", letters, index=None, horizontal=True, key=key_of(i))
-                st.divider()
-            if st.form_submit_button("✅ 제출하고 채점하기", type="primary"):
-                ss.mock_done = True
-                ss.mock_elapsed = time.time() - ss.mock_start
-                st.rerun()
+        for i, q in enumerate(qs):
+            st.markdown(f"#### {i + 1}.")
+            st.write(q.get('question', ''))
+            opts = q.get('options', '')
+            st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', opts).strip())
+            letters = sorted(set(re.findall(r'(?:^|\s)([A-F])\.', opts))) or ["A", "B", "C", "D"]
+            n_ans = len(norm_answer(q['original_answer']).split(","))
+            if n_ans > 1:
+                st.multiselect(f"답 {n_ans}개 선택", letters, max_selections=n_ans, key=key_of(i))
+            else:
+                st.radio("답 선택", letters, index=None, horizontal=True, key=key_of(i))
+            st.divider()
+        # 위젯 값은 화면에서 사라지면 Streamlit이 지우므로 별도 dict에 복사해 둔다
+        ss.mock_answers = {str(q['id']): ss.get(key_of(i)) for i, q in enumerate(qs)}
+        answered = sum(bool(a) for a in ss.mock_answers.values())
+        if st.button(f"✅ 제출하고 채점하기 ({answered}/{len(qs)} 응답)", type="primary"):
+            ss.mock_done = True
+            ss.mock_elapsed = time.time() - ss.mock_start
+            save_mock_state()
+            st.rerun()
+        save_mock_state()
         st.stop()
 
     # --- 채점 ---
     rows = []
     for i, q in enumerate(qs):
-        picked = ss.get(key_of(i))
+        picked = ss.mock_answers.get(str(q['id']))
         mine = norm_answer(",".join(picked) if isinstance(picked, list) else (picked or ""))
         correct = norm_answer(q['original_answer'])
         rows.append({
