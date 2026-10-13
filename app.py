@@ -9,6 +9,7 @@ from core.services import (
     explain_service, 
     save_to_notion,
     save_wrong_note_to_notion,
+    remove_wrong_note_from_notion,
     extract_and_save_keywords
 )
 from core.settings import settings
@@ -437,6 +438,34 @@ elif app_mode == "📝 모의고사 모드":
                     except Exception as e:
                         st.error(f"오류 발생: {e}")
 
+
+    right_df = df[df["정답여부"]]
+    st.divider()
+    st.subheader(f"⭕ 맞힌 문제 ({len(right_df)}개)")
+    st.caption("찍어서 맞혔다면 오답노트에 저장하고, 확실히 알게 된 문제는 오답노트에서 지우세요.")
+    for _, r in right_df.iterrows():
+        q = r["q"]
+        with st.expander(f"{r['no']}번 (원본 #{r['id']}) · {r['도메인']} · {r['서비스']} — 정답 {r['정답']}"):
+            st.write(q['question'])
+            st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', q['options']).strip())
+            c_guess, c_done = st.columns(2)
+            if c_guess.button("🤔 찍어서 맞춤 → 오답노트 저장", key=f"mock_guess_{rnd}_{r['no']}"):
+                with st.spinner("AI 해설 생성 + 노션 저장 중..."):
+                    try:
+                        st.markdown(save_mock_wrong(r).explanation)
+                        st.success("오답노트 저장 완료!")
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
+            if c_done.button("🧹 확실히 앎 → 오답노트에서 삭제", key=f"mock_clear_{rnd}_{r['no']}"):
+                with st.spinner("노션 오답노트 삭제 중..."):
+                    try:
+                        cnt = remove_wrong_note_from_notion(notion_client, settings.notion_wrong_db_id, q.get('id'))
+                        if cnt:
+                            st.success(f"원본 #{q.get('id')} 오답노트 {cnt}개를 휴지통으로 옮겼어요.")
+                        else:
+                            st.info(f"원본 #{q.get('id')} 오답노트가 없어요.")
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
 
 # ==========================================
 # 모드 2: 외부 문제 분석기

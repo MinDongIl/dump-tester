@@ -183,6 +183,18 @@ def save_wrong_note_to_notion(
     )
 
 
+def remove_wrong_note_from_notion(notion_client: NotionClient, db_id: str, q_no: int) -> int:
+    """'문제 {q_no}번 - ...' 제목의 오답노트를 휴지통으로 이동하고 개수를 반환 (노션 휴지통에서 복구 가능)"""
+    # notion-client 3.x(API 2025-09-03)는 database 대신 data source로 조회해야 함
+    ds_id = notion_client.databases.retrieve(database_id=db_id)["data_sources"][0]["id"]
+    res = notion_client.data_sources.query(
+        ds_id, filter={"property": "문제 요약", "title": {"starts_with": f"문제 {q_no}번 -"}}
+    )
+    for page in res["results"]:
+        notion_client.pages.update(page_id=page["id"], in_trash=True)
+    return len(res["results"])
+
+
 def _wrong_note_markdown(question: str, options: str, my_answer: str, correct_answer: str) -> str:
     """오답노트 본문 앞에 붙일 문제/보기/답 섹션. 문제가 없으면 빈 문자열."""
     if not question.strip():
