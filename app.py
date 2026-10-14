@@ -9,7 +9,7 @@ from core.services import (
     explain_service, 
     save_to_notion,
     save_wrong_note_to_notion,
-    remove_wrong_note_from_notion,
+    remove_wrong_notes_from_notion,
     extract_and_save_keywords
 )
 from core.settings import settings
@@ -80,6 +80,25 @@ def explain_cached(q: dict) -> QnAModel:
             json.dump(cache, f, ensure_ascii=False, indent=2)
         os.replace(tmp, EXPLAIN_FILE)  # 쓰다가 끊겨도 기존 캐시가 깨지지 않게
     return res
+
+
+# --- 문제별 누적 오답 횟수 (모의고사에서 틀릴 때마다 +1, 2회 이상이면 오답노트에 🔥 표시) ---
+WRONG_STATS_FILE = os.path.splitext(DATA_FILE)[0] + "_wrong_stats.json"
+
+
+def load_wrong_stats() -> dict:
+    try:
+        with open(WRONG_STATS_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_wrong_stats(stats: dict) -> None:
+    tmp = WRONG_STATS_FILE + ".tmp"
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(stats, f, ensure_ascii=False)
+    os.replace(tmp, WRONG_STATS_FILE)
 
 # --- 페이지 기본 설정 (동적 타이틀 적용) ---
 st.set_page_config(
@@ -251,6 +270,7 @@ if app_mode == "📚 내 문제집 풀기":
                             options=current_q.get('options', ''),
                             my_answer=st.session_state.get(f"submitted_{st.session_state.q_idx}") or mine,
                             correct_answer=current_q.get('original_answer', ''),
+                            wrong_count=load_wrong_stats().get(str(st.session_state.q_idx + 1), 0),
                         )
                         st.success("오답노트가 노션에 저장되었습니다! ⚡")
                     except Exception as e:
@@ -287,7 +307,7 @@ elif app_mode == "📝 모의고사 모드":
     MOCK_FILE = os.path.splitext(DATA_FILE)[0] + "_mock_state.json"
 
     def save_mock_state():
-        state = {k: ss[k] for k in ("mock_round", "mock_start", "mock_done", "mock_answers") if k in ss}
+        state = {k: ss[k] for k in ("mock_round", "mock_start", "mock_done", "mock_answers", "mock_guessed", "mock_sync_msgs") if k in ss}
         state["mock_elapsed"] = ss.get("mock_elapsed", 0)
         state["qids"] = [q['id'] for q in ss.mock_qs]
         tmp = MOCK_FILE + ".tmp"
@@ -307,10 +327,14 @@ elif app_mode == "📝 모의고사 모드":
                 for k in ("mock_round", "mock_start", "mock_done", "mock_elapsed"):
                     ss[k] = saved[k]
                 ss.mock_answers = saved.get("mock_answers", {})
-                for i, q in enumerate(restored):  # 응시 중이었다면 고른 답을 위젯에 다시 채움
+                ss.mock_guessed = saved.get("mock_guessed", {})
+                ss.mock_sync_msgs = saved.get("mock_sync_msgs", [])
+                for i, q in enumerate(restored):  # 응시 중이었다면 고른 답·찍음 표시를 위젯에 다시 채움
                     a = ss.mock_answers.get(str(q['id']))
                     if a and not ss.mock_done:
                         ss[f"mock_{ss.mock_round}_{i}"] = a
+                    if ss.mock_guessed.get(str(q['id'])) and not ss.mock_done:
+                        ss[f"guess_{ss.mock_round}_{i}"] = True
         except (json.JSONDecodeError, KeyError):
             pass
 
@@ -322,6 +346,8 @@ elif app_mode == "📝 모의고사 모드":
         ss.mock_start = time.time()
         ss.mock_done = False
         ss.mock_answers = {}
+        ss.mock_guessed = {}
+        ss.mock_sync_msgs = []
         ss.mock_elapsed = 0
         save_mock_state()
         st.rerun()
@@ -338,6 +364,62 @@ elif app_mode == "📝 모의고사 모드":
     def key_of(i):
         return f"mock_{rnd}_{i}"
 
+    def grade_rows():
+        rows = []
+        for i, q in enumerate(qs):
+            picked = ss.mock_answers.get(str(q['id']))
+            mine = norm_answer(",".join(picked) if isinstance(picked, list) else (picked or ""))
+            correct = norm_answer(q['original_answer'])
+            rows.append({
+                "no": i + 1, "id": q.get('id'), "q": q,
+                "도메인": q.get('domain') or "미분류", "서비스": q.get('service') or "미분류",
+                "내 답": mine or "무응답", "정답": correct, "정답여부": mine == correct,
+                "찍음": bool(ss.get("mock_guessed", {}).get(str(q['id']))),
+            })
+        return rows
+
+    def save_mock_wrong(r):
+        q = r["q"]
+        res = explain_cached(q)
+        save_wrong_note_to_notion(
+            notion_client, settings.notion_wrong_db_id, q.get('id', r["no"]),
+            res.topic, res.used_services, res.explanation,
+            question=q['question'], options=q['options'],
+            my_answer=r["내 답"] + (" (찍어서 맞춤)" if r["정답여부"] else ""),
+            correct_answer=q['original_answer'],
+            wrong_count=load_wrong_stats().get(str(q.get('id')), 0),
+        )
+        return res
+
+    def sync_after_submit(rows):
+        """제출 직후 1회: 누적 오답 +1, 확실히 맞힌 문제는 오답노트 삭제, 찍어서 맞힌 문제는 오답노트 저장"""
+        msgs = []
+        stats = load_wrong_stats()
+        for r in rows:
+            if not r["정답여부"]:
+                stats[str(r["id"])] = stats.get(str(r["id"]), 0) + 1
+        save_wrong_stats(stats)
+        if not settings.notion_wrong_db_id:
+            return [("info", "노션 오답노트 DB가 설정되지 않아 오답노트 자동 정리는 건너뛰었어요.")]
+        learned = [r["id"] for r in rows if r["정답여부"] and not r["찍음"]]
+        try:
+            n_removed = remove_wrong_notes_from_notion(notion_client, settings.notion_wrong_db_id, learned)
+            if n_removed:
+                msgs.append(("success", f"🧹 확실히 맞힌 문제의 오답노트 {n_removed}개를 자동으로 지웠어요. (노션 휴지통에서 복구 가능)"))
+        except Exception as e:
+            msgs.append(("error", f"오답노트 자동 삭제 실패: {e}"))
+        guessed_right = [r for r in rows if r["정답여부"] and r["찍음"]]
+        saved = 0
+        for r in guessed_right:
+            try:
+                save_mock_wrong(r)
+                saved += 1
+            except Exception as e:
+                msgs.append(("error", f"원본 #{r['id']} 오답노트 저장 실패: {e}"))
+        if saved:
+            msgs.append(("success", f"🤔 찍어서 맞힌 {saved}문제를 오답노트에 저장했어요."))
+        return msgs
+
     # --- 응시 화면 ---
     if not ss.mock_done:
         st.caption(f"총 {len(qs)}문항 · 시작 {time.strftime('%H:%M', time.localtime(ss.mock_start))} · 다 풀고 맨 아래 **제출** 버튼")
@@ -352,29 +434,27 @@ elif app_mode == "📝 모의고사 모드":
                 st.multiselect(f"답 {n_ans}개 선택", letters, max_selections=n_ans, key=key_of(i))
             else:
                 st.radio("답 선택", letters, index=None, horizontal=True, key=key_of(i))
+            st.checkbox("🤔 찍음 / 헷갈림 (맞혀도 오답노트에 저장)", key=f"guess_{rnd}_{i}")
             st.divider()
         # 위젯 값은 화면에서 사라지면 Streamlit이 지우므로 별도 dict에 복사해 둔다
         ss.mock_answers = {str(q['id']): ss.get(key_of(i)) for i, q in enumerate(qs)}
+        ss.mock_guessed = {str(q['id']): bool(ss.get(f"guess_{rnd}_{i}")) for i, q in enumerate(qs)}
         answered = sum(bool(a) for a in ss.mock_answers.values())
         if st.button(f"✅ 제출하고 채점하기 ({answered}/{len(qs)} 응답)", type="primary"):
             ss.mock_done = True
             ss.mock_elapsed = time.time() - ss.mock_start
+            save_mock_state()  # 노션 처리 중 끊겨도 채점 결과는 남도록 먼저 저장
+            with st.spinner("채점 중... 오답노트 자동 정리 중 (찍은 문제는 AI 해설 생성)"):
+                ss.mock_sync_msgs = sync_after_submit(grade_rows())
             save_mock_state()
             st.rerun()
         save_mock_state()
         st.stop()
 
     # --- 채점 ---
-    rows = []
-    for i, q in enumerate(qs):
-        picked = ss.mock_answers.get(str(q['id']))
-        mine = norm_answer(",".join(picked) if isinstance(picked, list) else (picked or ""))
-        correct = norm_answer(q['original_answer'])
-        rows.append({
-            "no": i + 1, "id": q.get('id'), "q": q,
-            "도메인": q.get('domain') or "미분류", "서비스": q.get('service') or "미분류",
-            "내 답": mine or "무응답", "정답": correct, "정답여부": mine == correct,
-        })
+    for kind, msg in ss.get("mock_sync_msgs", []):
+        getattr(st, kind)(msg)
+    rows = grade_rows()
     df = pd.DataFrame(rows)
     total, right = len(df), int(df["정답여부"].sum())
 
@@ -401,17 +481,6 @@ elif app_mode == "📝 모의고사 모드":
     st.divider()
     st.subheader(f"❌ 오답 목록 ({len(wrong)}개)")
 
-    def save_mock_wrong(r):
-        q = r["q"]
-        res = explain_cached(q)
-        save_wrong_note_to_notion(
-            notion_client, settings.notion_wrong_db_id, q.get('id', r["no"]),
-            res.topic, res.used_services, res.explanation,
-            question=q['question'], options=q['options'],
-            my_answer=r["내 답"], correct_answer=q['original_answer'],
-        )
-        return res
-
     if not wrong.empty and st.button(f"📥 오답 {len(wrong)}개 전부 AI 해설 + 노션 오답노트 저장"):
         bar = st.progress(0.0)
         fails = []
@@ -425,9 +494,12 @@ elif app_mode == "📝 모의고사 모드":
         for f in fails:
             st.error(f)
 
+    stats = load_wrong_stats()
     for _, r in wrong.iterrows():
         q = r["q"]
-        with st.expander(f"{r['no']}번 (원본 #{r['id']}) · {r['도메인']} · {r['서비스']} — 내 답 {r['내 답']} / 정답 {r['정답']}"):
+        cnt = stats.get(str(r['id']), 0)
+        fire = f" · 🔥 누적 {cnt}회 오답" if cnt >= 2 else ""
+        with st.expander(f"{r['no']}번 (원본 #{r['id']}) · {r['도메인']} · {r['서비스']} — 내 답 {r['내 답']} / 정답 {r['정답']}{fire}"):
             st.write(q['question'])
             st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', q['options']).strip())
             if st.button("🤖 AI 해설 보고 오답노트 저장", key=f"mock_save_{rnd}_{r['no']}"):
@@ -442,28 +514,18 @@ elif app_mode == "📝 모의고사 모드":
     right_df = df[df["정답여부"]]
     st.divider()
     st.subheader(f"⭕ 맞힌 문제 ({len(right_df)}개)")
-    st.caption("찍어서 맞혔다면 오답노트에 저장하고, 확실히 알게 된 문제는 오답노트에서 지우세요.")
+    st.caption("확실히 맞힌 문제는 오답노트에서 자동으로 지워지고, 🤔 찍음 표시한 문제는 자동으로 저장돼요.")
     for _, r in right_df.iterrows():
         q = r["q"]
-        with st.expander(f"{r['no']}번 (원본 #{r['id']}) · {r['도메인']} · {r['서비스']} — 정답 {r['정답']}"):
+        tag = " · 🤔 찍음 → 오답노트 저장됨" if r["찍음"] else ""
+        with st.expander(f"{r['no']}번 (원본 #{r['id']}) · {r['도메인']} · {r['서비스']} — 정답 {r['정답']}{tag}"):
             st.write(q['question'])
             st.markdown(re.sub(r'([A-F]\.)', r'\n\n**\1**', q['options']).strip())
-            c_guess, c_done = st.columns(2)
-            if c_guess.button("🤔 찍어서 맞춤 → 오답노트 저장", key=f"mock_guess_{rnd}_{r['no']}"):
+            if not r["찍음"] and st.button("🤔 사실 찍었음 → 오답노트 저장", key=f"mock_guess_{rnd}_{r['no']}"):
                 with st.spinner("AI 해설 생성 + 노션 저장 중..."):
                     try:
                         st.markdown(save_mock_wrong(r).explanation)
                         st.success("오답노트 저장 완료!")
-                    except Exception as e:
-                        st.error(f"오류 발생: {e}")
-            if c_done.button("🧹 확실히 앎 → 오답노트에서 삭제", key=f"mock_clear_{rnd}_{r['no']}"):
-                with st.spinner("노션 오답노트 삭제 중..."):
-                    try:
-                        cnt = remove_wrong_note_from_notion(notion_client, settings.notion_wrong_db_id, q.get('id'))
-                        if cnt:
-                            st.success(f"원본 #{q.get('id')} 오답노트 {cnt}개를 휴지통으로 옮겼어요.")
-                        else:
-                            st.info(f"원본 #{q.get('id')} 오답노트가 없어요.")
                     except Exception as e:
                         st.error(f"오류 발생: {e}")
 

@@ -153,9 +153,15 @@ class KeywordListModel(BaseModel):
 def save_wrong_note_to_notion(
     notion_client: NotionClient, db_id: str, q_no: int, topic: str, tags: list, explanation: str,
     question: str = "", options: str = "", my_answer: str = "", correct_answer: str = "",
+    wrong_count: int = 0,
 ) -> None:
+    """오답노트 저장. 같은 문제 번호의 기존 노트는 휴지통으로 옮겨 문제당 1개만 유지.
+    wrong_count >= 2 이면 🔥 아이콘·'🔥 반복 오답' 태그·제목에 누적 횟수를 붙인다."""
     print(f"❌ 기존 해설을 활용하여 오답노트를 Notion에 직접 저장합니다... (문제 {q_no}번)")
-    
+
+    if q_no > 0:  # 0번은 외부 문제(번호 없음)라 서로 다른 노트가 섞이므로 중복 정리하지 않음
+        remove_wrong_notes_from_notion(notion_client, db_id, [q_no])
+
     safe_tags = []
     for tag in tags:
         clean_tag = tag.replace(",", " ").strip()
@@ -163,36 +169,45 @@ def save_wrong_note_to_notion(
         if clean_tag:
             safe_tags.append({"name": clean_tag})
 
+    repeat = wrong_count >= 2
+    title = f"문제 {q_no}번 - {topic}" + (f" ({wrong_count}회 오답)" if repeat else "")
+    warn = f"> 🔥 이 문제를 **{wrong_count}번** 틀렸어요. 꼭 외우세요.\n\n" if repeat else ""
+    if repeat:
+        safe_tags.insert(0, {"name": "🔥 반복 오답"})
+
     notion_client.pages.create(
         parent={"database_id": db_id},
-        icon={"type": "emoji", "emoji": "❌"},
+        icon={"type": "emoji", "emoji": "🔥" if repeat else "❌"},
         properties={
-            "문제 요약": { 
-                "title": [
-                    {
-                        "type": "text",
-                        "text": {"content": f"문제 {q_no}번 - {topic}"},
-                    }
-                ]
-            },
-            "Tags": { 
-                "multi_select": safe_tags  
-            }
+            "문제 요약": {"title": [{"type": "text", "text": {"content": title}}]},
+            "Tags": {"multi_select": safe_tags},
         },
-        children=notionize(_wrong_note_markdown(question, options, my_answer, correct_answer) + explanation)
+        children=notionize(warn + _wrong_note_markdown(question, options, my_answer, correct_answer) + explanation)
     )
 
 
-def remove_wrong_note_from_notion(notion_client: NotionClient, db_id: str, q_no: int) -> int:
-    """'문제 {q_no}번 - ...' 제목의 오답노트를 휴지통으로 이동하고 개수를 반환 (노션 휴지통에서 복구 가능)"""
+def remove_wrong_notes_from_notion(notion_client: NotionClient, db_id: str, q_nos) -> int:
+    """제목이 '문제 {번호}번 -'인 오답노트를 휴지통으로 이동(노션에서 복구 가능). 옮긴 개수 반환"""
+    targets = {int(n) for n in q_nos}
+    if not targets:
+        return 0
     # notion-client 3.x(API 2025-09-03)는 database 대신 data source로 조회해야 함
     ds_id = notion_client.databases.retrieve(database_id=db_id)["data_sources"][0]["id"]
-    res = notion_client.data_sources.query(
-        ds_id, filter={"property": "문제 요약", "title": {"starts_with": f"문제 {q_no}번 -"}}
-    )
-    for page in res["results"]:
-        notion_client.pages.update(page_id=page["id"], in_trash=True)
-    return len(res["results"])
+    moved, cursor = 0, None
+    while True:
+        kwargs = {"page_size": 100}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        res = notion_client.data_sources.query(ds_id, **kwargs)
+        for page in res["results"]:
+            title = "".join(t.get("plain_text", "") for t in page["properties"]["문제 요약"]["title"])
+            m = re.match(r"문제 (\d+)번 -", title)
+            if m and int(m.group(1)) in targets:
+                notion_client.pages.update(page_id=page["id"], in_trash=True)
+                moved += 1
+        if not res.get("has_more"):
+            return moved
+        cursor = res["next_cursor"]
 
 
 def _wrong_note_markdown(question: str, options: str, my_answer: str, correct_answer: str) -> str:
