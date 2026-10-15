@@ -15,7 +15,7 @@ langchain-anthropic
 
 # Notion API
 notion-client
-notionize
+notionize==0.2.4
 certifi
 
 # PDF Extraction Tool

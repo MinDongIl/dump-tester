@@ -10,6 +10,28 @@ from notion_client import Client as NotionClient
 
 from core.settings import settings
 from notionize import notionize
+import notionize.converters as _nc
+
+
+def _inline_tokens(tokens, annotations=None):
+    """notionize 0.2.x는 인라인 코드(`...`)·줄바꿈·굵게 안의 코드를 버려서 노션에 빈칸으로 저장됨 → 직접 변환"""
+    out = []
+    for t in tokens:
+        kind, ann = t["type"], dict(annotations or {})
+        if kind == "text":
+            out.append(_nc.create_text(t["raw"], ann or None))
+        elif kind == "codespan":
+            out.append(_nc.create_text(t["raw"], {**ann, "code": True}))
+        elif kind in ("strong", "emphasis"):
+            out.extend(_inline_tokens(t.get("children", []), {**ann, ("bold" if kind == "strong" else "italic"): True}))
+        elif kind == "link":
+            out.extend(_nc.create_links(t))
+        elif kind in ("softbreak", "linebreak"):
+            out.append(_nc.create_text(" " if kind == "softbreak" else "\n", ann or None))
+    return out
+
+
+_nc.convert_inline_tokens = _inline_tokens  # shortcut: notionize 내부 함수 교체, 라이브러리 업데이트 시 동작 확인 필요
 
 # ==========================================
 # 공통 유틸리티 함수
